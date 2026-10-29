@@ -258,6 +258,11 @@ std::string pass_images(QPDF& pdf, ContentAnalysis const& ca, Options const& opt
         bool use_jpeg = jpeg_encode(
                             reinterpret_cast<unsigned char const*>(pixels.data()), nw, nh, nc, opt.quality, jpeg) &&
             jpeg.size() < baseline;
+        size_t chosen = use_jpeg ? jpeg.size() : baseline;
+        if (chosen >= raw_size) {
+            log.info("  image ", og.unparse(' '), " ", w, "x", h, ": no smaller encoding found, kept");
+            continue;
+        }
         if (!use_jpeg && !downsample) {
             log.info("  image ", og.unparse(' '), " ", w, "x", h, ": JPEG not smaller, kept");
             continue;

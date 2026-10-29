@@ -80,3 +80,26 @@ add_test(NAME dedup.text_glyphs_images COMMAND ${CHECK} compare ${OUT}/triple.pd
 math(EXPR PDFDISTILL_TRIPLE_LIMIT "${PDFDISTILL_SIZE_LIMIT} + 20000")
 add_test(NAME dedup.size_regression COMMAND ${CHECK} maxsize ${OUT}/triple.distilled.pdf ${PDFDISTILL_TRIPLE_LIMIT})
 set_tests_properties(dedup.valid dedup.text_glyphs_images dedup.size_regression PROPERTIES FIXTURES_REQUIRED triple_out)
+
+# --- glyphs shown by a form XObject using the caller's font (no Tf inside) --
+add_test(NAME inherit_font.make_input COMMAND ${CHECK} inherit-font ${FIXTURE} ${OUT}/inherit.pdf)
+set_tests_properties(inherit_font.make_input PROPERTIES FIXTURES_SETUP inherit_in)
+add_test(NAME inherit_font.run COMMAND ${CLI} ${OUT}/inherit.pdf -o ${OUT}/inherit.distilled.pdf)
+set_tests_properties(inherit_font.run PROPERTIES FIXTURES_REQUIRED inherit_in FIXTURES_SETUP inherit_out)
+add_test(NAME inherit_font.text_glyphs_images COMMAND ${CHECK} compare ${OUT}/inherit.pdf ${OUT}/inherit.distilled.pdf)
+set_tests_properties(inherit_font.text_glyphs_images PROPERTIES FIXTURES_REQUIRED inherit_out)
+
+# --- encrypted input is passed through unchanged (empty and non-empty user password)
+# pdfcheck treats a user password of "-" as empty.
+foreach(pw_case IN ITEMS open:- locked:secret)
+    string(REPLACE ":" ";" pw_parts "${pw_case}")
+    list(GET pw_parts 0 pw_name)
+    list(GET pw_parts 1 pw)
+    add_test(NAME encrypted_${pw_name}.make_input COMMAND ${CHECK} encrypt ${FIXTURE} ${OUT}/enc_${pw_name}.pdf ${pw})
+    set_tests_properties(encrypted_${pw_name}.make_input PROPERTIES FIXTURES_SETUP enc_${pw_name}_in)
+    add_test(NAME encrypted_${pw_name}.run COMMAND ${CLI} ${OUT}/enc_${pw_name}.pdf -o ${OUT}/enc_${pw_name}.out.pdf)
+    set_tests_properties(encrypted_${pw_name}.run PROPERTIES FIXTURES_REQUIRED enc_${pw_name}_in FIXTURES_SETUP enc_${pw_name}_out)
+    add_test(NAME encrypted_${pw_name}.unchanged
+        COMMAND ${CMAKE_COMMAND} -E compare_files ${OUT}/enc_${pw_name}.pdf ${OUT}/enc_${pw_name}.out.pdf)
+    set_tests_properties(encrypted_${pw_name}.unchanged PROPERTIES FIXTURES_REQUIRED enc_${pw_name}_out)
+endforeach()

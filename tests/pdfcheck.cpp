@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -58,8 +59,9 @@ struct Glyph {
 class Collector: public QPDFObjectHandle::ParserCallbacks
 {
   public:
-    explicit Collector(QPDFObjectHandle res) :
-        resources(std::move(res))
+    explicit Collector(QPDFObjectHandle res, QPDFObjectHandle inherited_font = QPDFObjectHandle()) :
+        resources(std::move(res)),
+        font(std::move(inherited_font))
     {
     }
     void handleObject(QPDFObjectHandle obj) override
@@ -85,13 +87,14 @@ class Collector: public QPDFObjectHandle::ParserCallbacks
                 images.push_back(x);
             } else if (x.isStream()) {
                 auto r = x.getDict().getKey("/Resources");
-                Collector sub(r.isDictionary() ? r : resources);
+                Collector sub(r.isDictionary() ? r : resources, font);
                 QPDFObjectHandle::parseContentStream(x, &sub);
                 shown.insert(shown.end(), sub.shown.begin(), sub.shown.end());
                 images.insert(images.end(), sub.images.begin(), sub.images.end());
                 for (auto& [k, v]: sub.used) {
                     used[k].insert(v.begin(), v.end());
                 }
+                fonts.insert(sub.fonts.begin(), sub.fonts.end());
             }
         }
         operands.clear();
@@ -294,6 +297,40 @@ int cmd_concat(char const* in, char const* out, char const* count)
     return 0;
 }
 
+// Adds a form XObject that shows a glyph (GID 268, unused elsewhere in the
+// fixture) without its own Tf, relying on the font inherited from the caller.
+int cmd_inherit_font(char const* in, char const* out)
+{
+    QPDF pdf;
+    pdf.processFile(in);
+    auto page = QPDFPageDocumentHelper(pdf).getAllPages().at(0);
+    auto res = page.getAttribute("/Resources", false);
+    auto form = pdf.newStream("q BT 100 100 Td <010C> Tj ET Q");
+    auto fd = form.getDict();
+    fd.replaceKey("/Type", QPDFObjectHandle::newName("/XObject"));
+    fd.replaceKey("/Subtype", QPDFObjectHandle::newName("/Form"));
+    fd.replaceKey("/BBox", QPDFObjectHandle::parse("[0 0 600 800]"));
+    fd.replaceKey("/Resources", res);
+    auto xobj = res.getKey("/XObject");
+    xobj.replaceKey("/FxInherit", pdf.makeIndirectObject(form));
+    auto font = *res.getKey("/Font").getKeys().begin();
+    page.addPageContents(pdf.newStream("q BT " + font + " 40 Tf ET /FxInherit Do Q"), false);
+    QPDFWriter w(pdf, out);
+    w.write();
+    return 0;
+}
+
+int cmd_encrypt(char const* in, char const* out, char const* user)
+{
+    QPDF pdf;
+    pdf.processFile(in);
+    QPDFWriter w(pdf, out);
+    w.setR6EncryptionParameters(
+        std::strcmp(user, "-") == 0 ? "" : user, "owner", true, true, true, true, true, true, qpdf_r3p_full, true);
+    w.write();
+    return 0;
+}
+
 int cmd_maxsize(char const* path, char const* limit)
 {
     std::ifstream in(path, std::ios::binary | std::ios::ate);
@@ -325,6 +362,12 @@ int main(int argc, char* argv[])
         }
         if (cmd == "concat" && argc == 5) {
             return cmd_concat(argv[2], argv[3], argv[4]);
+        }
+        if (cmd == "inherit-font" && argc == 4) {
+            return cmd_inherit_font(argv[2], argv[3]);
+        }
+        if (cmd == "encrypt" && argc == 5) {
+            return cmd_encrypt(argv[2], argv[3], argv[4]);
         }
         if (cmd == "maxsize" && argc == 4) {
             return cmd_maxsize(argv[2], argv[3]);

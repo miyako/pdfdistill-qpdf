@@ -45,13 +45,19 @@ class Walker
     class Callbacks: public QPDFObjectHandle::ParserCallbacks
     {
       public:
-        Callbacks(Walker& w, QPDFObjectHandle resources, Matrix ctm, bool ctm_known, int depth) :
+        Callbacks(
+            Walker& w,
+            QPDFObjectHandle resources,
+            Matrix ctm,
+            bool ctm_known,
+            int depth,
+            std::shared_ptr<FontInfo> font) :
             w(w),
             resources(std::move(resources)),
             ctm_known(ctm_known),
             depth(depth)
         {
-            stack.push_back(GState{ctm, nullptr});
+            stack.push_back(GState{ctm, std::move(font)});
         }
         void handleObject(QPDFObjectHandle obj) override;
         void handleEOF() override {}
@@ -71,9 +77,17 @@ class Walker
         QPDFObjectHandle resources,
         Matrix const& ctm,
         bool ctm_known,
-        int depth);
+        int depth,
+        std::shared_ptr<FontInfo> font = nullptr);
     void visit_resources(QPDFObjectHandle resources, int depth);
-    void walk_form(QPDFObjectHandle form, QPDFObjectHandle parent_resources, Matrix const& ctm, bool ctm_known, int depth);
+    void walk_form(
+        QPDFObjectHandle form,
+        QPDFObjectHandle parent_resources,
+        Matrix const& ctm,
+        bool ctm_known,
+        int depth,
+        std::shared_ptr<FontInfo> font = nullptr);
+    void poison_fonts(QPDFObjectHandle resources);
     void walk_unknown_placement(QPDFObjectHandle form, QPDFObjectHandle parent_resources, int depth);
     std::shared_ptr<FontInfo> font_info(QPDFObjectHandle font, int depth);
     void poison(QPDFObjectHandle resources);
@@ -174,6 +188,22 @@ std::shared_ptr<FontInfo> Walker::font_info(QPDFObjectHandle font, int depth)
     return info;
 }
 
+void Walker::poison_fonts(QPDFObjectHandle resources)
+{
+    if (!resources.isDictionary()) {
+        return;
+    }
+    auto fonts = resources.getKey("/Font");
+    if (fonts.isDictionary()) {
+        for (auto const& k: fonts.getKeys()) {
+            auto info = font_info(fonts.getKey(k), 0);
+            if (info && info->has_fontfile) {
+                ca.fontfile_blacklist.insert(info->fontfile);
+            }
+        }
+    }
+}
+
 void Walker::poison(QPDFObjectHandle resources)
 {
     if (!resources.isDictionary()) {
@@ -272,7 +302,12 @@ void Walker::walk_unknown_placement(QPDFObjectHandle form, QPDFObjectHandle pare
 }
 
 void Walker::walk_form(
-    QPDFObjectHandle form, QPDFObjectHandle parent_resources, Matrix const& ctm, bool ctm_known, int depth)
+    QPDFObjectHandle form,
+    QPDFObjectHandle parent_resources,
+    Matrix const& ctm,
+    bool ctm_known,
+    int depth,
+    std::shared_ptr<FontInfo> font)
 {
     if (!form.isStream()) {
         return;
@@ -298,10 +333,11 @@ void Walker::walk_form(
         snprintf(
             key,
             sizeof(key),
-            "%d %d %d %.3g %.3g %.3g %.3g %.3g %.3g",
+            "%d %d %d %p %.3g %.3g %.3g %.3g %.3g %.3g",
             og.getObj(),
             og.getGen(),
             ctm_known ? 1 : 0,
+            static_cast<void*>(font.get()),
             m.a,
             m.b,
             m.c,
@@ -313,14 +349,19 @@ void Walker::walk_form(
         }
         form_stack.insert(og);
     }
-    walk(form, res, m, ctm_known, depth + 1);
+    walk(form, res, m, ctm_known, depth + 1, std::move(font));
     if (form.isIndirect()) {
         form_stack.erase(og);
     }
 }
 
 void Walker::walk(
-    QPDFObjectHandle contents, QPDFObjectHandle resources, Matrix const& ctm, bool ctm_known, int depth)
+    QPDFObjectHandle contents,
+    QPDFObjectHandle resources,
+    Matrix const& ctm,
+    bool ctm_known,
+    int depth,
+    std::shared_ptr<FontInfo> font)
 {
     if (depth > 64 || budget == 0) {
         poison(resources);
@@ -328,7 +369,7 @@ void Walker::walk(
     }
     --budget;
     visit_resources(resources, depth);
-    Callbacks cb(*this, resources, ctm, ctm_known, depth);
+    Callbacks cb(*this, resources, ctm, ctm_known, depth, std::move(font));
     try {
         QPDFObjectHandle::parseContentStream(contents, &cb);
     } catch (std::exception& e) {
@@ -340,7 +381,15 @@ void Walker::walk(
 void Walker::Callbacks::show(QPDFObjectHandle const& str)
 {
     auto& font = stack.back().font;
-    if (!font || !font->subsettable || !str.isString()) {
+    if (!str.isString()) {
+        return;
+    }
+    if (!font) {
+        // Text shown without a known font: protect every font in reach.
+        w.poison_fonts(resources);
+        return;
+    }
+    if (!font->subsettable) {
         return;
     }
     auto s = str.getStringValue();
@@ -407,7 +456,7 @@ void Walker::Callbacks::handleObject(QPDFObjectHandle obj)
             if (subtype == "/Image") {
                 w.image_drawn(x, gs.ctm, ctm_known);
             } else if (subtype == "/Form") {
-                w.walk_form(x, resources, gs.ctm, ctm_known, depth);
+                w.walk_form(x, resources, gs.ctm, ctm_known, depth, gs.font);
             }
         }
     }

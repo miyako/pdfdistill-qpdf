@@ -45,8 +45,9 @@ pdfdistill-qpdf <INPUT|-> [-o <OUTPUT|->] [options]
   used (stdin/stdout are switched to binary mode on Windows).
 * The output is **never larger than the input**: if the optimized file would be
   bigger (or equal), the original bytes are written unchanged.
-* Output is deterministic (same input + options → identical bytes), except for
-  encrypted inputs, whose `/ID` is preserved by qpdf.
+* **Encrypted inputs** (with or without a user password) are passed through
+  byte-for-byte unchanged, matching the sibling implementations.
+* Output is deterministic (same input + options → identical bytes).
 
 Examples:
 
@@ -92,7 +93,8 @@ The passes run in this order on an in-memory `QPDF` document:
    walked with qpdf's content-stream parser: page contents, Form XObjects
    (recursively), annotation appearance streams, tiling patterns, soft-mask
    groups and Type 3 glyph procedures, tracking `q/Q`, `cm`, `Tf`, `gs /Font`
-   and `Tj`/`TJ`/`'`/`"`. For `Type0` fonts with `Identity-H`/`Identity-V`
+   and `Tj`/`TJ`/`'`/`"`. Form XObjects inherit the caller's current font; text
+   shown with no known font protects every font in that resource scope. For `Type0` fonts with `Identity-H`/`Identity-V`
    encoding and a `CIDFontType2` descendant with `FontFile2`, the used CIDs are
    mapped through `/CIDToGIDMap` (Identity or stream) to glyph IDs. The font
    program is then subset with HarfBuzz `hb-subset` using
@@ -215,7 +217,7 @@ license texts.
 
 ## Tests
 
-`ctest` runs 27 tests against `tests/fixtures/ms-print-to-pdf-1.pdf` using a
+`ctest` runs 36 tests against `tests/fixtures/ms-print-to-pdf-1.pdf` using a
 helper, `pdfcheck` (`tests/pdfcheck.cpp`, built with qpdf + HarfBuzz):
 
 * `pdfcheck check` – `qpdf --check`-equivalent: loads the file, decodes every
@@ -231,7 +233,9 @@ helper, `pdfcheck` (`tests/pdfcheck.cpp`, built with qpdf + HarfBuzz):
   byte-identical to file output; `--lossless`, `--max-dpi 30`, structure-only;
   re-distilling an already optimized file never grows it; a document made of
   three independently imported copies of the fixture (`pdfcheck concat`) must
-  dedup back to roughly the size of one.
+  dedup back to roughly the size of one; a Form XObject that shows a glyph with
+  the font inherited from the page (`pdfcheck inherit-font`) keeps that glyph;
+  RC4/AES-256 encrypted copies (`pdfcheck encrypt`) are passed through unchanged.
 
 ## Licenses
 

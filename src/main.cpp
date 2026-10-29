@@ -4,6 +4,7 @@
 
 #include <qpdf/Buffer.hh>
 #include <qpdf/Pl_Flate.hh>
+#include <qpdf/QPDFExc.hh>
 #include <qpdf/QPDFLogger.hh>
 #include <qpdf/QPDFWriter.hh>
 
@@ -265,7 +266,24 @@ int run(Args const& args)
 
     QPDF pdf;
     pdf.setSuppressWarnings(opt.quiet);
-    pdf.processMemoryFile(input_name.c_str(), input.data(), input.size());
+    bool encrypted = false;
+    try {
+        pdf.processMemoryFile(input_name.c_str(), input.data(), input.size());
+        encrypted = pdf.isEncrypted();
+    } catch (QPDFExc& e) {
+        if (e.getErrorCode() != qpdf_e_password) {
+            throw;
+        }
+        encrypted = true;
+    }
+    if (encrypted) {
+        write_all(args.output, input);
+        if (!opt.quiet) {
+            std::cerr << "pdfdistill-qpdf: " << input_name << ": " << input.size() << " -> " << input.size()
+                      << " bytes (0.0% smaller) [encrypted; original kept]\n";
+        }
+        return 0;
+    }
 
     size_t last = input.size();
     auto stats = [&](char const* step, std::string const& detail) {
