@@ -235,7 +235,7 @@ helper, `pdfcheck` (`tests/pdfcheck.cpp`, built with qpdf + HarfBuzz):
   three independently imported copies of the fixture (`pdfcheck concat`) must
   dedup back to roughly the size of one; a Form XObject that shows a glyph with
   the font inherited from the page (`pdfcheck inherit-font`) keeps that glyph;
-  RC4/AES-256 encrypted copies (`pdfcheck encrypt`) are passed through unchanged.
+  AES-256 encrypted copies (empty and non-empty user password) (`pdfcheck encrypt`) are passed through unchanged.
 
 ## Licenses
 
