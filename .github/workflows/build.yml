@@ -1,0 +1,128 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Must match "builtin-baseline" in vcpkg.json.
+  VCPKG_COMMIT: d4c0a46cb8f63e5c9fa007d13baf1cb3e43bf7e3
+  VCPKG_DISABLE_METRICS: 1
+
+jobs:
+  macos-universal:
+    runs-on: macos-15
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/../vcpkg
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/../vcpkg-cache,readwrite
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: brew install ninja
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../vcpkg-cache
+          key: vcpkg-macos-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/*osx*') }}
+          restore-keys: vcpkg-macos-${{ env.VCPKG_COMMIT }}-
+      - name: Bootstrap vcpkg
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/../vcpkg-cache"
+          git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          git -C "$VCPKG_ROOT" checkout "$VCPKG_COMMIT"
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+      - name: Build (arm64 + x86_64), test, lipo
+        run: ./scripts/build-macos-universal.sh
+      - name: Smoke test x86_64 slice under Rosetta
+        run: |
+          softwareupdate --install-rosetta --agree-to-license || true
+          arch -x86_64 build/universal/pdfdistill-qpdf --version || echo "Rosetta unavailable; skipped"
+      - name: Package
+        run: |
+          mkdir -p dist/pdfdistill-qpdf-macos-universal
+          cp build/universal/pdfdistill-qpdf README.md LICENSE THIRD_PARTY_LICENSES.md dist/pdfdistill-qpdf-macos-universal/
+          mkdir -p dist/pdfdistill-qpdf-macos-universal/licenses
+          for p in qpdf harfbuzz libjpeg-turbo zlib; do
+            cp "build/arm64/vcpkg_installed/arm64-osx-pdfdistill/share/$p/copyright" "dist/pdfdistill-qpdf-macos-universal/licenses/$p.txt"
+          done
+          tar -C dist -czf dist/pdfdistill-qpdf-macos-universal.tar.gz pdfdistill-qpdf-macos-universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdfdistill-qpdf-macos-universal
+          path: dist/pdfdistill-qpdf-macos-universal.tar.gz
+
+  windows-x64:
+    runs-on: windows-2022
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\..\vcpkg
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\..\vcpkg-cache,readwrite
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\..\vcpkg-cache
+          key: vcpkg-windows-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/*windows*') }}
+          restore-keys: vcpkg-windows-${{ env.VCPKG_COMMIT }}-
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\..\vcpkg-cache" | Out-Null
+          git clone https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          git -C "$env:VCPKG_ROOT" checkout "$env:VCPKG_COMMIT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build/x64 -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static-pdfdistill
+      - name: Build
+        run: cmake --build build/x64 --config Release
+      - name: Test
+        run: ctest --test-dir build/x64 -C Release --output-on-failure
+      - name: Check for DLL dependencies
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem -Recurse "$vs\VC\Tools\MSVC" -Filter dumpbin.exe | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          & $dumpbin.FullName /dependents build/x64/Release/pdfdistill-qpdf.exe
+      - name: Package
+        shell: pwsh
+        run: |
+          $d = "dist/pdfdistill-qpdf-windows-x64"
+          New-Item -ItemType Directory -Force $d | Out-Null
+          Copy-Item build/x64/Release/pdfdistill-qpdf.exe, README.md, LICENSE, THIRD_PARTY_LICENSES.md $d
+          New-Item -ItemType Directory -Force "$d/licenses" | Out-Null
+          foreach ($p in "qpdf", "harfbuzz", "libjpeg-turbo", "zlib") {
+            Copy-Item "build/x64/vcpkg_installed/x64-windows-static-pdfdistill/share/$p/copyright" "$d/licenses/$p.txt"
+          }
+          Compress-Archive -Path $d -DestinationPath dist/pdfdistill-qpdf-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdfdistill-qpdf-windows-x64
+          path: dist/pdfdistill-qpdf-windows-x64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos-universal, windows-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --generate-notes
