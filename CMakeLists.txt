@@ -34,10 +34,15 @@ find_package(harfbuzz CONFIG REQUIRED)
 # vcpkg libraries instead so the binary stays self-contained.
 get_target_property(_qpdf_libs qpdf::libqpdf INTERFACE_LINK_LIBRARIES)
 if(_qpdf_libs)
-  list(TRANSFORM _qpdf_libs REPLACE "^z$" "ZLIB::ZLIB")
-  list(TRANSFORM _qpdf_libs REPLACE "^zlib$" "ZLIB::ZLIB")
-  list(TRANSFORM _qpdf_libs REPLACE "^jpeg$" "JPEG::JPEG")
-  list(TRANSFORM _qpdf_libs REPLACE "^jpeg-static$" "JPEG::JPEG")
+  # Names differ per platform (z/zs/zlib/zlibstatic, jpeg/jpeg-static, ...)
+  # and may be wrapped in $<LINK_ONLY:...>.
+  list(TRANSFORM _qpdf_libs REPLACE
+    "^(\\$<LINK_ONLY:)?(z|zs|zd|zsd|zlib|zlibd|zlibstatic|zlibstaticd)(\\.lib)?(>)?$"
+    "\\1ZLIB::ZLIB\\4")
+  list(TRANSFORM _qpdf_libs REPLACE
+    "^(\\$<LINK_ONLY:)?(jpeg|jpeg-static|jpeg62|turbojpeg|turbojpeg-static)(\\.lib)?(>)?$"
+    "\\1JPEG::JPEG\\4")
+  message(STATUS "qpdf::libqpdf link interface: ${_qpdf_libs}")
   set_target_properties(qpdf::libqpdf PROPERTIES INTERFACE_LINK_LIBRARIES "${_qpdf_libs}")
 endif()
 
