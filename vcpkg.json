@@ -1,0 +1,13 @@
+{
+  "name": "pdfdistill-qpdf",
+  "version-string": "0.1.0",
+  "description": "Shrink bloated PDFs (e.g. Microsoft Print to PDF output) using qpdf",
+  "license": "MIT",
+  "builtin-baseline": "d4c0a46cb8f63e5c9fa007d13baf1cb3e43bf7e3",
+  "dependencies": [
+    "zlib",
+    "libjpeg-turbo",
+    { "name": "qpdf", "default-features": false },
+    { "name": "harfbuzz", "default-features": false }
+  ]
+}
