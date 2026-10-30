@@ -23,7 +23,8 @@ If `class` does not extend `_distill_Controller` (or is omitted), the constructo
 | onResponse | 4D.Function | | Called when a job completes (set by `execute()` from `events.onResponse`, see [Callbacks](#callbacks)) |
 | onError | 4D.Function | | Called on a worker error (set by `execute()` from `events.onError`) |
 | onTerminate | 4D.Function | | Called when a worker terminates (set by `execute()` from `events.onTerminate`) |
-| onData | 4D.Function | | Stored by `execute()` from `events.onData` but **currently never called** (the CLI does not report progress) |
+| onData | 4D.Function | | Set by `execute()` from `events.onData`. Not useful: the CLI emits no progress and partial output is meaningless |
+| onDataError | 4D.Function | | Set by `execute()` from `events.onDataError` |
 | worker | 4D.SystemWorker | read-only | The currently running worker (`Null` when idle) |
 | controller | cs.qpdf._distill_Controller | read-only | The attached controller instance |
 
@@ -37,7 +38,7 @@ Properties inherited from [`_CLI`](_CLI.md): `name`, `EOL`, `executableName`, `p
 | --- | --- | --- | --- |
 | Result | Text | <- | Version number of the CLI, e.g. `"0.1.0"` |
 
-Runs `pdfdistill-qpdf --version` synchronously and returns the trailing version number of the first output line. Returns an empty string if the executable could not be run or the output was not recognised.
+Runs `pdfdistill-qpdf --version` synchronously and returns the CLI version number from the first output line (which reads e.g. `pdfdistill-qpdf 0.1.0 (qpdf 12.4.2)`; the qpdf library version is not returned). Returns an empty string if the executable could not be run or the output was not recognised.
 
 ```4d
 var $version : Text
@@ -63,7 +64,7 @@ Elements are interpreted by value type:
 | Element | Behaviour |
 | --- | --- |
 | `4D.File` / `4D.Folder` | Its POSIX path is shell-escaped and appended (use for the input file and the `-o` output file) |
-| Text `"-o"` / `"--output"` | Appended as-is; marks the task as writing to a file, so its result is `Null` |
+| Text `"-o"` / `"--output"` | Appended as-is; the PDF goes to the following path (or to stdout if followed by `"-"`) |
 | Text `"-"` | Appended as-is; means "read from stdin" (as INPUT) or "write to stdout" (after `-o`); enables the stdin payload from `.file` |
 | Other Text | Shell-escaped and appended (CLI flags such as `"--quality"`, `"--lossless"`, or a path as Text) |
 | Number | Converted with `String()` and appended (e.g. the value of `--quality` or `--max-dpi`) |
@@ -93,14 +94,17 @@ Supported CLI options (see the [CLI documentation](../../../README.md#usage)):
 
 ### Synchronous mode
 
-When `events` is omitted (or has no `onResponse` function), each task runs to completion before the next starts and `execute()` returns a collection with one element per task:
+When `events` is omitted (or has no `onResponse` function), each task runs to completion before the next starts and `execute()` returns a collection with one result object per task:
 
-* `Null` if the task contains `-o` / `--output`;
-* otherwise the CLI's stdout decoded as UTF-8 **Text** (an empty string when the CLI writes to the default `<input>.distilled.pdf`).
+| Property | Type | Description |
+| --- | --- | --- |
+| response | 4D.Blob | The CLI's stdout (the distilled PDF when it writes to stdout; empty when writing to a file) |
+| responseError | Text | The CLI's stderr (summary line, `-v` statistics or error message) |
+| exitCode | Integer | `0` = success, `1` = runtime error, `2` = usage error |
 
-Because stdout is captured as text, **PDF output to stdout is not usable from 4D** (binary data would be corrupted). Always pass `"-o"` followed by a `4D.File` and read the file afterwards.
+**Blob in / Blob out:** pass `"-"` as INPUT and the PDF as the stdin payload, without `-o` (or with `"-o"; "-"`): `["-"; …options; {file: $blob}]`. The distilled PDF is returned in `response`.
 
-The CLI's diagnostics (summary line, errors) go to stderr and are not returned in synchronous mode. Check that the output file exists, or use asynchronous mode to inspect `$worker.exitCode` and `$worker.responseError`.
+Any callbacks left on the instance by a previous asynchronous call are cleared, so synchronous calls always collect stdout/stderr.
 
 ### Asynchronous mode
 
@@ -110,10 +114,11 @@ When `events.onResponse` is a `4D.Function`, the commands are queued and `execut
 | --- | --- | --- |
 | events.onResponse | 4D.Function | Required. Called once per task when the CLI has finished |
 | events.onError | 4D.Function | Optional. Called on a worker error |
+| events.onDataError | 4D.Function | Optional. Called when stderr data arrives |
 | events.onTerminate | 4D.Function | Optional. Called when a worker terminates |
-| events.onData | 4D.Function | Optional. Stored but currently never called |
+| events.onData | 4D.Function | Optional. Not useful: the CLI emits no progress and partial stdout is not a usable PDF |
 
-The callback functions are stored on the instance (and the controller) and remain set for later calls; use a new `distill` instance for each asynchronous job.
+The callback functions are stored on the instance and replaced (or cleared) by the next `execute()` call.
 
 ### Callbacks
 
@@ -121,7 +126,7 @@ The callback functions are stored on the instance (and the controller) and remai
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| $1 | 4D.SystemWorker | The finished worker: `.exitCode` (0 = success), `.responseError` (stderr: summary line or error message), `.response` (stdout as Text) |
+| $1 | 4D.SystemWorker | The finished worker: `.exitCode` (0 = success), `.responseError` (stderr: summary line or error message), `.response` (stdout as `4D.Blob`) |
 | $2 | Object | SystemWorker event object (`.type` = `"response"`); `.context` holds the `data` value of the task's context object |
 
 `This` is the controller. The component's own `onResponse` project method shows this signature.
@@ -168,19 +173,21 @@ End for each
 cs.qpdf.distill.new().execute($tasks)
 ```
 
-### Blob to file via stdin (synchronous)
+### Blob to Blob via stdin/stdout (synchronous)
 
 ```4d
 var $pdf : 4D.Blob
 $pdf:=Folder(fk desktop folder).file("report.pdf").getContent()
 
-var $out : 4D.File
-$out:=Folder(fk desktop folder).file("report.distilled.pdf")
+var $result : Object
+$result:=cs.qpdf.distill.new().execute(["-"; "--quality"; 60; {file: $pdf}])[0]
 
-cs.qpdf.distill.new().execute(["-"; "-o"; $out; {file: $pdf}])
-
-var $distilled : 4D.Blob
-$distilled:=$out.getContent()
+If ($result.exitCode=0)
+	var $distilled : 4D.Blob
+	$distilled:=$result.response
+Else 
+	ALERT($result.responseError)
+End if 
 ```
 
 ### Asynchronous with callback

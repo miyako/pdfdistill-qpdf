@@ -1,10 +1,114 @@
 # pdfdistill-qpdf
 
-A small, self-contained command-line tool that shrinks bloated PDFs — in
-particular files produced by **Microsoft Print to PDF**, which embeds complete
-TrueType fonts and stores photos as lossless Flate images.
+Shrinks bloated PDFs — in particular the ones produced by **Microsoft Print to PDF**, which
+embeds complete TrueType fonts and stores every image as lossless Flate — by deduplicating
+objects, subsetting fonts, recompressing/downsampling images and rewriting the file structure.
 
-It is written in C++17 on top of [qpdf](https://github.com/qpdf/qpdf) and is one
+This repository contains:
+
+* a **[4D component](#4d-component)** (`pdfdistill-qpdf/`) that lets 4D applications distill
+  PDFs through the class `cs.qpdf.distill`;
+* the **[command-line tool](#command-line-tool)** it wraps: a small, self-contained C++17
+  program built on [qpdf](https://github.com/qpdf/qpdf), HarfBuzz and libjpeg-turbo, linked
+  statically, with only permissively licensed dependencies.
+
+## 4D component
+
+The component bundles the `pdfdistill-qpdf` executable — a signed and notarized universal
+binary for macOS, and static builds for Windows x64 and ARM64 — in
+`Resources/bin/{macOS,Windows,WindowsARM}` (see [CI / releases](#ci--releases)) and runs it with
+`4D.SystemWorker`. If the executable for the current platform is missing, `pdfdistill-qpdf`
+is looked up on the `PATH`. No plug-in is involved. It targets 4D 20 and later.
+
+### Installation
+
+**Project Dependencies (4D 20 R6 and later):** add the component from the *Project
+Dependencies* panel (GitHub repository `miyako/pdfdistill-qpdf`), or declare it in your
+project's `Project/Sources/dependencies.json`:
+
+```json
+{
+  "dependencies": {
+    "pdfdistill-qpdf": {
+      "github": "miyako/pdfdistill-qpdf",
+      "version": "^20.0.0"
+    }
+  }
+}
+```
+
+**Manual:** download `pdfdistill-qpdf.zip` from the
+[latest release](https://github.com/miyako/pdfdistill-qpdf/releases/latest) and place the
+compiled component in your project's `Components` folder.
+
+The component's classes are exposed in the `cs.qpdf` class store.
+
+### Quick start
+
+```4d
+var $distill : cs.qpdf.distill
+$distill:=cs.qpdf.distill.new()
+
+var $version : Text
+$version:=$distill.version()  // e.g. "0.1.0"
+
+var $in; $out : 4D.File
+$in:=Folder(fk desktop folder).file("report.pdf")
+$out:=Folder(fk desktop folder).file("report.distilled.pdf")
+
+// file to file, synchronous; each task is a collection of CLI arguments
+$distill.execute([$in; "-o"; $out; "--quality"; 60; "--max-dpi"; 150])
+
+// several tasks in one call, e.g. lossless only
+$distill.execute([\
+  [$in; "-o"; $out; "--lossless"]; \
+  [Folder(fk desktop folder).file("other.pdf"); "--no-images"]])  // -> other.distilled.pdf
+
+// Blob in (via stdin), Blob out (via stdout)
+var $pdf : 4D.Blob
+$pdf:=$in.getContent()
+var $result : Object
+$result:=$distill.execute(["-"; "--quality"; 60; {file: $pdf}])[0]
+// $result.response: 4D.Blob (the PDF), $result.responseError: Text, $result.exitCode: Integer
+```
+
+Task elements are mapped to the command line by type: `4D.File` → its path, Text → an argument
+(flags such as `"--lossless"`), Number → its value, and an object `{data: …; file: …}` supplies
+a callback context (`data`) and/or the stdin payload (`file`, used when the input is `"-"`).
+Synchronous calls return one object per task: `{response: 4D.Blob; responseError: Text;
+exitCode: Integer}` (stdout, stderr, and `0` success / `1` runtime error / `2` usage error).
+For Blob in / Blob out, use `["-"; …options; {file: $blob}]`; the PDF is returned in `response`.
+
+To run asynchronously, pass an `onResponse` callback; it receives the `4D.SystemWorker`
+(`exitCode`, and the CLI's summary line in `responseError`) and the event object, whose
+`context` is the task's `data`. The calling process must stay alive until the callback fires:
+
+```4d
+#DECLARE($params : Object)
+
+If ($params=Null)
+	CALL WORKER(1; Current method name; {})
+Else 
+	var $in; $out : 4D.File
+	$in:=Folder(fk desktop folder).file("report.pdf")
+	$out:=Folder(fk desktop folder).file("report.distilled.pdf")
+	
+	cs.qpdf.distill.new().execute([[$in; "-o"; $out; {data: $out}]]; \
+		{onResponse: Formula(ALERT(String($1.exitCode)+": "+$1.responseError))})
+End if 
+```
+
+### Class documentation
+
+* [`distill`](pdfdistill-qpdf/Documentation/Classes/distill.md) — public API: `version()`,
+  `execute()`, `terminate()`, options, callbacks and examples
+* Internal: [`_CLI`](pdfdistill-qpdf/Documentation/Classes/_CLI.md),
+  [`_CLI_Controller`](pdfdistill-qpdf/Documentation/Classes/_CLI_Controller.md),
+  [`_distill_Controller`](pdfdistill-qpdf/Documentation/Classes/_distill_Controller.md)
+
+## Command-line tool
+
+The CLI is written in C++17 on top of [qpdf](https://github.com/qpdf/qpdf) and is one
 of three sibling implementations (Rust/lopdf, C++/qpdf, Go/pdfcpu) that share
 the same command-line interface so they can be benchmarked against each other.
 
@@ -20,7 +124,7 @@ Rendered output is pixel-identical outside the two photos (JPEG artifacts only);
 text extraction and every used glyph's outline/metrics are preserved (checked by
 the test suite).
 
-## Usage
+### Usage
 
 ```
 pdfdistill-qpdf <INPUT|-> [-o <OUTPUT|->] [options]
@@ -73,7 +177,7 @@ pdfdistill-qpdf in.pdf -o out.pdf --lossless   # no lossy image changes
 (Each step's size is measured by writing the document with the final writer
 settings, so object streams/max Flate are already included in the first line.)
 
-## What it does
+### What it does
 
 The passes run in this order on an in-memory `QPDF` document:
 
@@ -135,7 +239,7 @@ The passes run in this order on an in-memory `QPDF` document:
 `--lossless` runs passes 1, 2 and 4. With all three `--no-*` flags only the
 structural rewrite remains.
 
-## Building
+### Building
 
 Dependencies are provided by **vcpkg in manifest mode** (`vcpkg.json`, pinned
 `builtin-baseline`) and linked **statically**. Custom overlay triplets in
@@ -145,6 +249,7 @@ Dependencies are provided by **vcpkg in manifest mode** (`vcpkg.json`, pinned
 |---|---|
 | `arm64-osx-pdfdistill` / `x64-osx-pdfdistill` | macOS 11+, static libs (system `libc++`/`libSystem` dynamic) |
 | `x64-windows-static-pdfdistill` | Windows x64, static libs, static CRT (`/MT`) |
+| `arm64-windows-static-pdfdistill` | Windows ARM64, static libs, static CRT (`/MT`) |
 
 `CMakeLists.txt` points `VCPKG_OVERLAY_TRIPLETS` at that directory and sets
 `CMAKE_MSVC_RUNTIME_LIBRARY` to `MultiThreaded`, so the whole executable uses
@@ -160,7 +265,7 @@ git clone https://github.com/microsoft/vcpkg.git
 export VCPKG_ROOT=$PWD/vcpkg
 ```
 
-### macOS (universal arm64 + x86_64)
+#### macOS (universal arm64 + x86_64)
 
 vcpkg builds one architecture per triplet, so the script configures both
 architectures separately (each with its own static dependency tree) and merges
@@ -190,7 +295,7 @@ ctest --test-dir build/arm64 --output-on-failure
 > include directory into port builds, so stray Homebrew/MacPorts headers (for
 > example a libjpeg 9 `jpeglib.h`) cannot be mixed with the vcpkg libraries.
 
-### Windows (x64, static, /MT)
+#### Windows (x64 / ARM64, static, /MT)
 
 From a "x64 Native Tools" prompt or any shell with Visual Studio 2022:
 
@@ -205,17 +310,50 @@ ctest --test-dir build/x64 -C Release --output-on-failure
 The result `build/x64/Release/pdfdistill-qpdf.exe` depends only on system DLLs
 (`KERNEL32`, …).
 
-### CI / releases
+For Windows on ARM, build on an ARM64 machine (Visual Studio 2022 or later with
+the ARM64 build tools; omit `-G` to use the newest installed Visual Studio) with
+`-A ARM64` and the `arm64-windows-static-pdfdistill` triplet:
 
-`.github/workflows/build.yml` builds, tests and uploads
-`pdfdistill-qpdf-macos-universal.tar.gz` and `pdfdistill-qpdf-windows-x64.zip`
-on every push/PR (vcpkg binary packages are cached with `actions/cache`, keyed by
-the vcpkg commit, `vcpkg.json` and the triplets). Pushing a tag `v*` also
-creates a GitHub release with both archives. Each archive contains the
-binary, this README, `LICENSE`, `THIRD_PARTY_LICENSES.md` and the dependency
-license texts.
+```bat
+cmake -S . -B build/arm64 -A ARM64 ^
+  -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake ^
+  -DVCPKG_TARGET_TRIPLET=arm64-windows-static-pdfdistill
+cmake --build build/arm64 --config Release
+ctest --test-dir build/arm64 -C Release --output-on-failure
+```
 
-## Tests
+#### CI / releases
+
+`.github/workflows/build.yml` (build) builds and tests on GitHub-hosted runners and uploads
+`pdfdistill-qpdf-macos-universal.tar.gz` (macOS 15, arm64 + x86_64 via `lipo`),
+`pdfdistill-qpdf-windows-x64.zip` (Windows Server 2022) and
+`pdfdistill-qpdf-windows-arm64.zip` (native `windows-11-arm` runner) as artifacts. Both
+Windows builds are checked for a static CRT with `dumpbin /DEPENDENTS`. vcpkg binary
+packages are cached with `actions/cache`, keyed by the vcpkg commit, `vcpkg.json` and the
+triplets. Each archive contains the binary, this README, `LICENSE`,
+`THIRD_PARTY_LICENSES.md` and the dependency license texts. Pull requests only build and
+test.
+
+On push to `main` (changes outside `pdfdistill-qpdf/`) or a manual run on `main`, build also:
+
+1. code signs the macOS binary (Developer ID, hardened runtime, secure timestamp) and
+   notarizes it with `notarytool`; the job fails unless notarization is `Accepted` (a bare
+   Mach-O can't be stapled, so the ticket is fetched online by Gatekeeper);
+2. copies the binaries into the 4D component —
+   `pdfdistill-qpdf/Resources/bin/macOS/pdfdistill-qpdf`,
+   `pdfdistill-qpdf/Resources/bin/Windows/pdfdistill-qpdf.exe`,
+   `pdfdistill-qpdf/Resources/bin/WindowsARM/pdfdistill-qpdf.exe` — and commits them to `main`
+   as `github-actions[bot]` if they changed;
+3. dispatches the Publish workflow (`publish.yml`, patch bump), which builds, signs and
+   releases the 4D component from that commit.
+
+Signing uses the same repository secrets as Publish (`APPLE_DEVELOPER_ID_CERTIFICATE`,
+`APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `CODESIGN_APPLE_ID`,
+`NOTARYTOOL_APPLE_ID`, `NOTARYTOOL_TEAM_ID`, `NOTARYTOOL_PASSWORD`).
+
+Pushing a `v*` tag creates a GitHub release with the three CLI archives.
+
+### Tests
 
 `ctest` runs 36 tests against `tests/fixtures/ms-print-to-pdf-1.pdf` using a
 helper, `pdfcheck` (`tests/pdfcheck.cpp`, built with qpdf + HarfBuzz):

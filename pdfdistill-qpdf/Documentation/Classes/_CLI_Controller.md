@@ -1,12 +1,12 @@
 # _CLI_Controller
 ### Manages a queue of `4D.SystemWorker` commands for a `_CLI` instance.
 
-> cs.lopdf._CLI_Controller.new ( CLI : cs.lopdf._CLI ) : cs.lopdf._CLI_Controller
+> cs.qpdf._CLI_Controller.new ( CLI : cs.qpdf._CLI ) : cs.qpdf._CLI_Controller
 
 | Parameter | Type | | Description |
 | --- | --- | --- | --- |
-| CLI | cs.lopdf._CLI | -> | The owning `_CLI` instance |
-| Result | cs.lopdf._CLI_Controller | <- | New controller |
+| CLI | cs.qpdf._CLI | -> | The owning `_CLI` instance |
+| Result | cs.qpdf._CLI_Controller | <- | New controller |
 
 ## Description
 
@@ -26,7 +26,7 @@ Internal class. `_CLI_Controller` runs an ordered queue of command lines, each i
 | complete | Boolean | read-only | `True` once the queue has been drained |
 | worker | 4D.SystemWorker | read-only | The running worker (`Null` when idle) |
 | commands | Collection | read-only | Pending command lines |
-| instance | cs.lopdf._CLI | read-only | The owning `_CLI` instance |
+| instance | cs.qpdf._CLI | read-only | The owning `_CLI` instance |
 
 ### Event handlers
 
@@ -34,14 +34,14 @@ The properties `onData`, `onDataError`, `onError`, `onResponse` and `onTerminate
 
 ## .execute()
 
-> .execute ( command : Text | Collection { ; message : Variant { ; context : Variant } } ) : cs.lopdf._CLI_Controller
+> .execute ( command : Text | Collection { ; message : Variant { ; context : Variant } } ) : cs.qpdf._CLI_Controller
 
 | Parameter | Type | | Description |
 | --- | --- | --- | --- |
 | command | Text \| Collection | -> | Command line, or a collection of command lines |
 | message | Variant | -> | stdin payload, or a collection of payloads (one per command) |
 | context | Variant | -> | Context value, or a collection of values (one per command), returned as `$2.context` in `onResponse` |
-| Result | cs.lopdf._CLI_Controller | <- | `This`, for chaining |
+| Result | cs.qpdf._CLI_Controller | <- | `This`, for chaining |
 
 Appends the command(s) to the queue and starts the first one if no worker is running.
 
