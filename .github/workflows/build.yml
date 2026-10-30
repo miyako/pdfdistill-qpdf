@@ -257,7 +257,15 @@ jobs:
           install -m 755 "$RUNNER_TEMP/$BIN-macos-universal/$BIN"   "$COMPONENT_BIN/macOS/$BIN"
           install -m 644 "$RUNNER_TEMP/$BIN-windows-x64/$BIN.exe"   "$COMPONENT_BIN/Windows/$BIN.exe"
           install -m 644 "$RUNNER_TEMP/$BIN-windows-arm64/$BIN.exe" "$COMPONENT_BIN/WindowsARM/$BIN.exe"
-          git add "$COMPONENT_BIN"
+          # -f: *.exe is in .gitignore (the component's bin folder is re-included there,
+          # but don't rely on it).
+          git add -f "$COMPONENT_BIN/macOS/$BIN" "$COMPONENT_BIN/Windows/$BIN.exe" "$COMPONENT_BIN/WindowsARM/$BIN.exe"
+          for f in "$COMPONENT_BIN/macOS/$BIN" "$COMPONENT_BIN/Windows/$BIN.exe" "$COMPONENT_BIN/WindowsARM/$BIN.exe"; do
+            if ! git ls-files --error-unmatch -- "$f" > /dev/null; then
+              echo "::error::$f is not tracked/staged after git add; refusing to ship."
+              exit 1
+            fi
+          done
           git update-index --chmod=+x "$COMPONENT_BIN/macOS/$BIN"
           git status --short
           git ls-files -s "$COMPONENT_BIN"
