@@ -62,8 +62,6 @@ Function version() : Text
 	var $line : Text
 	$line:=$lines.first()
 	
-	//pdfdistill-qpdf 0.1.0 (qpdf 12.4.2)\n
-	
 	If (Match regex:C1019("\\s+([0-9.]+)\\s\\("; $line; 1; $pos; $len))
 		return Substring:C12($line; $pos{1}; $len{1})
 	End if 
