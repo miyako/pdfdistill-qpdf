@@ -27,7 +27,7 @@ on:
           required: true
 
 env: 
-  project_path: pdfdistill-qpdf/Project/pdfdistill-qdf.4DProject
+  project_path: pdfdistill-qpdf/Project/pdfdistill-qpdf.4DProject
   
 jobs:
 

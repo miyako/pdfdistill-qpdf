@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # The 4D component (incl. the binaries committed back by the `ship` job) is
+    # handled by publish.yml; don't rebuild the CLI for those changes.
+    paths-ignore:
+      - 'pdfdistill-qpdf/**'
   pull_request:
   workflow_dispatch:
 
@@ -14,13 +18,19 @@ env:
   # Must match "builtin-baseline" in vcpkg.json.
   VCPKG_COMMIT: d4c0a46cb8f63e5c9fa007d13baf1cb3e43bf7e3
   VCPKG_DISABLE_METRICS: 1
+  BIN: pdfdistill-qpdf
 
 jobs:
   macos-universal:
     runs-on: macos-15
+    outputs:
+      signed: ${{ steps.notarize.outputs.signed }}
     env:
       VCPKG_ROOT: ${{ github.workspace }}/../vcpkg
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/../vcpkg-cache,readwrite
+      # Signing/notarization only outside pull requests and only when secrets exist
+      # (they are absent for forks).
+      SIGN: ${{ github.event_name != 'pull_request' && secrets.APPLE_DEVELOPER_ID_CERTIFICATE != '' && secrets.CODESIGN_APPLE_ID != '' && secrets.NOTARYTOOL_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Ninja
@@ -39,6 +49,72 @@ jobs:
           "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
       - name: Build (arm64 + x86_64), test, lipo
         run: ./scripts/build-macos-universal.sh
+
+      - name: Setup keychain
+        id: keychain
+        if: env.SIGN == 'true'
+        uses: miyako/4D/.github/actions/deployment-setup-keychain@v1
+        with:
+          APPLE_DEVELOPER_ID_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE }}
+          APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+
+      - name: Codesign
+        if: env.SIGN == 'true'
+        env:
+          CODESIGN_APPLE_ID: ${{ secrets.CODESIGN_APPLE_ID }}
+          KEYCHAIN_PATH: ${{ steps.keychain.outputs.KEYCHAIN_PATH }}
+        run: |
+          codesign --force --options runtime --timestamp \
+            --keychain "$KEYCHAIN_PATH" \
+            --sign "$CODESIGN_APPLE_ID" "build/universal/$BIN"
+          codesign --verify --strict --verbose=2 "build/universal/$BIN"
+          codesign -dv --verbose=4 "build/universal/$BIN"
+
+      - name: Notarize
+        id: notarize
+        if: env.SIGN == 'true'
+        env:
+          NOTARYTOOL_APPLE_ID: ${{ secrets.NOTARYTOOL_APPLE_ID }}
+          NOTARYTOOL_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+          NOTARYTOOL_PASSWORD: ${{ secrets.NOTARYTOOL_PASSWORD }}
+        run: |
+          # A bare Mach-O can't be stapled; notarize it inside a zip so Gatekeeper
+          # can find the ticket online.
+          ditto -c -k --keepParent "build/universal/$BIN" "$RUNNER_TEMP/notarize.zip"
+          auth=(--apple-id "$NOTARYTOOL_APPLE_ID" --team-id "$NOTARYTOOL_TEAM_ID" --password "$NOTARYTOOL_PASSWORD")
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" "${auth[@]}" \
+            --wait --output-format json | tee "$RUNNER_TEMP/notarize.json"
+          id=$(jq -r '.id' "$RUNNER_TEMP/notarize.json")
+          status=$(jq -r '.status' "$RUNNER_TEMP/notarize.json")
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::Notarization status: $status"
+            xcrun notarytool log "$id" "${auth[@]}" || true
+            exit 1
+          fi
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signature
+        if: env.SIGN == 'true'
+        run: |
+          codesign --verify --strict --verbose=2 "build/universal/$BIN"
+          info=$(codesign -dv --verbose=2 "build/universal/$BIN" 2>&1)
+          echo "$info"
+          grep -q 'flags=0x10000(runtime)' <<<"$info" || { echo "::error::hardened runtime flag missing"; exit 1; }
+          # spctl assessment of a bare (unstapled) CLI tool is informational only
+          spctl --assess --type install --verbose=4 "build/universal/$BIN" || true
+          "build/universal/$BIN" --version
+          "build/universal/$BIN" tests/fixtures/ms-print-to-pdf-1.pdf -o "$RUNNER_TEMP/out.pdf"
+
+      - name: Cleanup keychain
+        if: always() && steps.keychain.outputs.KEYCHAIN_PATH != ''
+        env:
+          KEYCHAIN_PATH: ${{ steps.keychain.outputs.KEYCHAIN_PATH }}
+          CERTIFICATE_PATH: ${{ steps.keychain.outputs.CERTIFICATE_PATH }}
+        run: |
+          security delete-keychain "$KEYCHAIN_PATH" || true
+          rm -f "$CERTIFICATE_PATH" "$RUNNER_TEMP/notarize.zip"
+
       - name: Smoke test x86_64 slice under Rosetta
         run: |
           softwareupdate --install-rosetta --agree-to-license || true
@@ -57,19 +133,34 @@ jobs:
           name: pdfdistill-qpdf-macos-universal
           path: dist/pdfdistill-qpdf-macos-universal.tar.gz
 
-  windows-x64:
-    runs-on: windows-2022
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both build and test natively.
+          - arch: x64
+            runner: windows-2022
+            platform: x64
+            dumpbin_host: 'Hostx64\x64'
+          - arch: arm64
+            runner: windows-11-arm
+            platform: ARM64
+            dumpbin_host: 'Hostarm64\arm64'
+    runs-on: ${{ matrix.runner }}
     env:
       VCPKG_ROOT: ${{ github.workspace }}\..\vcpkg
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\..\vcpkg-cache,readwrite
+      TRIPLET: ${{ matrix.arch }}-windows-static-pdfdistill
+      ASSET: pdfdistill-qpdf-windows-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}\..\vcpkg-cache
-          key: vcpkg-windows-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/*windows*') }}
-          restore-keys: vcpkg-windows-${{ env.VCPKG_COMMIT }}-
+          key: vcpkg-windows-${{ matrix.arch }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json', format('cmake/triplets/{0}-windows*', matrix.arch)) }}
+          restore-keys: vcpkg-windows-${{ matrix.arch }}-${{ env.VCPKG_COMMIT }}-
       - name: Bootstrap vcpkg
         shell: pwsh
         run: |
@@ -80,38 +171,116 @@ jobs:
       - name: Configure
         shell: pwsh
         run: >
-          cmake -S . -B build/x64 -G "Visual Studio 17 2022" -A x64
+          cmake -S . -B build/${{ matrix.arch }} -G "Visual Studio 17 2022" -A ${{ matrix.platform }}
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-          -DVCPKG_TARGET_TRIPLET=x64-windows-static-pdfdistill
+          -DVCPKG_TARGET_TRIPLET="$env:TRIPLET"
       - name: Build
-        run: cmake --build build/x64 --config Release
+        run: cmake --build build/${{ matrix.arch }} --config Release
       - name: Test
-        run: ctest --test-dir build/x64 -C Release --output-on-failure
-      - name: Check for DLL dependencies
+        run: ctest --test-dir build/${{ matrix.arch }} -C Release --output-on-failure
+      - name: Check for DLL dependencies (static CRT)
         shell: pwsh
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $dumpbin = Get-ChildItem -Recurse "$vs\VC\Tools\MSVC" -Filter dumpbin.exe | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
-          & $dumpbin.FullName /dependents build/x64/Release/pdfdistill-qpdf.exe
+          $dumpbin = Get-ChildItem -Recurse "$vs\VC\Tools\MSVC" -Filter dumpbin.exe | Where-Object { $_.FullName -like '*${{ matrix.dumpbin_host }}*' } | Select-Object -First 1
+          if (-not $dumpbin) { $dumpbin = Get-ChildItem -Recurse "$vs\VC\Tools\MSVC" -Filter dumpbin.exe | Select-Object -First 1 }
+          $deps = & $dumpbin.FullName /DEPENDENTS "build/${{ matrix.arch }}/Release/$env:BIN.exe" | Out-String
+          Write-Output $deps
+          if ($deps -match 'VCRUNTIME|MSVCP|api-ms-win-crt') { Write-Error 'dynamic CRT dependency found'; exit 1 }
+          & "build/${{ matrix.arch }}/Release/$env:BIN.exe" --version
       - name: Package
         shell: pwsh
         run: |
-          $d = "dist/pdfdistill-qpdf-windows-x64"
+          $d = "dist/$env:ASSET"
           New-Item -ItemType Directory -Force $d | Out-Null
-          Copy-Item build/x64/Release/pdfdistill-qpdf.exe, README.md, LICENSE, THIRD_PARTY_LICENSES.md $d
+          Copy-Item "build/${{ matrix.arch }}/Release/$env:BIN.exe", README.md, LICENSE, THIRD_PARTY_LICENSES.md $d
           New-Item -ItemType Directory -Force "$d/licenses" | Out-Null
           foreach ($p in "qpdf", "harfbuzz", "libjpeg-turbo", "zlib") {
-            Copy-Item "build/x64/vcpkg_installed/x64-windows-static-pdfdistill/share/$p/copyright" "$d/licenses/$p.txt"
+            Copy-Item "build/${{ matrix.arch }}/vcpkg_installed/$env:TRIPLET/share/$p/copyright" "$d/licenses/$p.txt"
           }
-          Compress-Archive -Path $d -DestinationPath dist/pdfdistill-qpdf-windows-x64.zip
+          Compress-Archive -Path $d -DestinationPath "dist/$env:ASSET.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: pdfdistill-qpdf-windows-x64
-          path: dist/pdfdistill-qpdf-windows-x64.zip
+          name: ${{ env.ASSET }}
+          path: dist/${{ env.ASSET }}.zip
+
+  # Copy the binaries into the 4D component, commit them to main and trigger Publish.
+  # Only on push to main / manual dispatch on main; never for pull requests or tags.
+  ship:
+    if: >-
+      github.repository == 'miyako/pdfdistill-qpdf' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [macos-universal, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    concurrency:
+      group: ship-main
+      cancel-in-progress: false
+    env:
+      COMPONENT_BIN: pdfdistill-qpdf/Resources/bin
+    steps:
+      - name: Require signed macOS binary
+        if: needs.macos-universal.outputs.signed != 'true'
+        run: |
+          echo "::error::macOS binary was not signed/notarized (signing secrets missing?); refusing to ship."
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+          merge-multiple: true
+      - name: Copy binaries into the 4D component
+        env:
+          ART: ${{ runner.temp }}/artifacts
+        run: |
+          set -euo pipefail
+          tar -xzf "$ART/$BIN-macos-universal.tar.gz" -C "$RUNNER_TEMP"
+          for a in x64 arm64; do
+            unzip -o -q "$ART/$BIN-windows-$a.zip" -d "$RUNNER_TEMP"
+          done
+          mkdir -p "$COMPONENT_BIN/macOS" "$COMPONENT_BIN/Windows" "$COMPONENT_BIN/WindowsARM"
+          install -m 755 "$RUNNER_TEMP/$BIN-macos-universal/$BIN"   "$COMPONENT_BIN/macOS/$BIN"
+          install -m 644 "$RUNNER_TEMP/$BIN-windows-x64/$BIN.exe"   "$COMPONENT_BIN/Windows/$BIN.exe"
+          install -m 644 "$RUNNER_TEMP/$BIN-windows-arm64/$BIN.exe" "$COMPONENT_BIN/WindowsARM/$BIN.exe"
+          git add "$COMPONENT_BIN"
+          git update-index --chmod=+x "$COMPONENT_BIN/macOS/$BIN"
+          git status --short
+          git ls-files -s "$COMPONENT_BIN"
+      - name: Commit and push
+        id: commit
+        run: |
+          set -euo pipefail
+          if git diff --cached --quiet; then
+            echo "Binaries unchanged; nothing to commit."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update CLI binaries in 4D component (${GITHUB_SHA::7}) [skip ci]"
+          for _ in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git pull --rebase origin main
+          done
+          echo "::error::Failed to push binaries to main"
+          exit 1
+      - name: Trigger Publish
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref main -f use_self_hosted=false -f mode=patch
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [macos-universal, windows-x64]
+    needs: [macos-universal, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
