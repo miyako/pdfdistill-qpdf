@@ -35,6 +35,8 @@
 
 # Executables
 *.exe
+# ...except the CLI bundled in the 4D component (committed by the build workflow)
+!/pdfdistill-qpdf/Resources/bin/**/*.exe
 *.out
 *.app
 

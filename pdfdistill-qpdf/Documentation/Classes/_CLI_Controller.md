@@ -16,7 +16,7 @@ Internal class. `_CLI_Controller` runs an ordered queue of command lines, each i
 
 | Property | Type | | Description |
 | --- | --- | --- | --- |
-| dataType | Text | | Worker data type (default `"text"`) |
+| dataType | Text | | Worker data type (default `"blob"`) |
 | encoding | Text | | Text encoding (default `"UTF-8"`) |
 | variables | Object | | Environment variables for each worker (default `{}`) |
 | timeout | Variant | | Worker timeout in seconds (default `Null` = no timeout) |
