@@ -310,11 +310,12 @@ ctest --test-dir build/x64 -C Release --output-on-failure
 The result `build/x64/Release/pdfdistill-qpdf.exe` depends only on system DLLs
 (`KERNEL32`, …).
 
-For Windows on ARM, build on an ARM64 machine (Visual Studio 2022 with the ARM64
-build tools) with `-A ARM64` and the `arm64-windows-static-pdfdistill` triplet:
+For Windows on ARM, build on an ARM64 machine (Visual Studio 2022 or later with
+the ARM64 build tools; omit `-G` to use the newest installed Visual Studio) with
+`-A ARM64` and the `arm64-windows-static-pdfdistill` triplet:
 
 ```bat
-cmake -S . -B build/arm64 -G "Visual Studio 17 2022" -A ARM64 ^
+cmake -S . -B build/arm64 -A ARM64 ^
   -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake ^
   -DVCPKG_TARGET_TRIPLET=arm64-windows-static-pdfdistill
 cmake --build build/arm64 --config Release
